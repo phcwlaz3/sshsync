@@ -82,3 +82,20 @@ def copy_from_repo(repo_dir: Path, filename: str, dest: Path) -> None:
 def list_managed_files(repo_dir: Path, managed: List[str]) -> List[Path]:
     """Return a list of managed file paths that exist inside *repo_dir*."""
     return [repo_dir / name for name in managed if (repo_dir / name).exists()]
+
+
+def ensure_ssh_dir(mode: int = 0o700) -> Path:
+    """Ensure the ~/.ssh directory exists with the correct permissions.
+
+    Creates the directory if it does not exist and sets its mode to *mode*
+    (default 0o700, as required by OpenSSH).
+
+    Returns the path to the ~/.ssh directory.
+    """
+    directory = ssh_dir()
+    try:
+        directory.mkdir(mode=mode, parents=True, exist_ok=True)
+        os.chmod(directory, mode)
+    except OSError as exc:
+        raise SSHFileError(f"Cannot create SSH directory {directory}: {exc}") from exc
+    return directory
