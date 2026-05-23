@@ -1,73 +1,52 @@
 """Conflict resolution strategies for sshsync."""
 
-from __future__ import annotations
-
 from enum import Enum
-from pathlib import Path
-from typing import Callable
+from typing import List
 
-from sshsync.conflict import ConflictError, ConflictReport, files_differ
+from sshsync.conflict import Conflict, ConflictReport, ConflictError
 
 
 class Strategy(str, Enum):
-    """Available conflict resolution strategies."""
-
     LOCAL_WINS = "local"
     REMOTE_WINS = "remote"
     FAIL = "fail"
 
 
-# Type alias for a resolver callable: (local_path, remote_path) -> resolved_text
-Resolver = Callable[[Path, Path], str]
+def _local_wins(conflicts: List[Conflict], local_lines: List[str], remote_lines: List[str]) -> List[str]:
+    """Return local lines unchanged — local always wins."""
+    return list(local_lines)
 
 
-def _local_wins(local: Path, _remote: Path) -> str:
-    return local.read_text(encoding="utf-8")
+def _remote_wins(conflicts: List[Conflict], local_lines: List[str], remote_lines: List[str]) -> List[str]:
+    """Return remote lines — remote always wins."""
+    return list(remote_lines)
 
 
-def _remote_wins(_local: Path, remote: Path) -> str:
-    return remote.read_text(encoding="utf-8")
+def _fail_on_conflict(conflicts: List[Conflict], local_lines: List[str], remote_lines: List[str]) -> List[str]:
+    """Raise ConflictError if there are any conflicts."""
+    if conflicts:
+        raise ConflictError(
+            f"{len(conflicts)} conflict(s) detected; resolve manually or choose a strategy.",
+            conflicts=conflicts,
+        )
+    return list(local_lines)
 
 
-def _fail_on_conflict(local: Path, remote: Path) -> str:
-    raise ConflictError(
-        f"Conflict detected between {local} and {remote}. "
-        "Resolve manually or choose a different strategy."
-    )
-
-
-_RESOLVERS: dict[Strategy, Resolver] = {
+_STRATEGY_MAP = {
     Strategy.LOCAL_WINS: _local_wins,
     Strategy.REMOTE_WINS: _remote_wins,
     Strategy.FAIL: _fail_on_conflict,
 }
 
 
-def get_resolver(strategy: Strategy) -> Resolver:
-    """Return the resolver function for the given strategy."""
-    try:
-        return _RESOLVERS[strategy]
-    except KeyError:
-        raise ValueError(f"Unknown strategy: {strategy!r}")
+def get_resolver(strategy: Strategy):
+    """Return the resolver callable for the given strategy.
 
-
-def resolve_file(
-    local: Path,
-    remote: Path,
-    strategy: Strategy,
-    report: ConflictReport | None = None,
-) -> str:
-    """Resolve a conflict between *local* and *remote* using *strategy*.
-
-    If *report* is provided and the files do not differ, the original local
-    content is returned immediately without invoking the resolver.
+    The returned callable has signature:
+        (conflicts, local_lines, remote_lines) -> List[str]
     """
-    if not files_differ(local, remote):
-        return local.read_text(encoding="utf-8")
-
-    if report is not None and not report.has_conflicts:
-        # Byte-level difference but no line conflicts — safe to take local.
-        return local.read_text(encoding="utf-8")
-
-    resolver = get_resolver(strategy)
-    return resolver(local, remote)
+    try:
+        return _STRATEGY_MAP[Strategy(strategy)]
+    except (KeyError, ValueError):
+        valid = ", ".join(s.value for s in Strategy)
+        raise ValueError(f"Unknown strategy {strategy!r}. Valid options: {valid}")
