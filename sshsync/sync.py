@@ -1,73 +1,75 @@
-"""High-level sync operations: push local SSH files to repo and pull from repo."""
+"""High-level push/pull orchestration for sshsync."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
 
 from sshsync.config import SyncConfig
-from sshsync.git_ops import GitError, commit, pull, push
-from sshsync.ssh_files import SSHFileError, copy_from_repo, copy_to_repo, ssh_dir
+from sshsync.git_ops import GitError, pull, push, commit
+from sshsync.merge import merge_known_hosts, merge_ssh_config
+from sshsync.ssh_files import SSHFileError, backup_file, read_file, write_file
 
 
 class SyncError(Exception):
     """Raised when a sync operation fails."""
 
 
-def push_ssh_files(config: SyncConfig, repo_dir: Path) -> List[str]:
-    """Copy managed SSH files into *repo_dir*, commit, and push.
-
-    Returns the list of filenames that were staged.
-    Raises SyncError on failure.
-    """
-    staged: List[str] = []
-    local_ssh = ssh_dir()
-
-    for filename in config.managed_files:
-        src = local_ssh / filename
-        if not src.exists():
-            continue
-        try:
-            copy_to_repo(src, repo_dir, filename)
-            staged.append(filename)
-        except SSHFileError as exc:
-            raise SyncError(f"Failed to stage {filename}: {exc}") from exc
-
-    if not staged:
-        return staged
-
-    try:
-        commit(repo_dir, f"sshsync: update {', '.join(staged)}")
-        push(repo_dir, config.branch)
-    except GitError as exc:
-        raise SyncError(f"Git operation failed: {exc}") from exc
-
-    return staged
+_MERGE_FN = {
+    "config": merge_ssh_config,
+    "known_hosts": merge_known_hosts,
+}
 
 
-def pull_ssh_files(config: SyncConfig, repo_dir: Path) -> List[str]:
-    """Pull latest changes from remote and copy managed files to ~/.ssh.
+def push_ssh_files(cfg: SyncConfig, repo_dir: Path) -> None:
+    """Copy managed SSH files into *repo_dir*, commit and push.
 
-    Returns the list of filenames that were updated.
-    Raises SyncError on failure.
+    Raises :class:`SyncError` on any failure.
     """
     try:
-        pull(repo_dir, config.branch)
-    except GitError as exc:
-        raise SyncError(f"Git pull failed: {exc}") from exc
+        for filename in cfg.managed_files:
+            src = read_file(cfg.ssh_dir / filename)
+            dest = repo_dir / filename
+            write_file(dest, src)
 
-    updated: List[str] = []
-    local_ssh = ssh_dir()
+        commit(repo_dir, message="sshsync: update SSH files")
+        push(repo_dir, branch=cfg.branch)
+    except (SSHFileError, GitError) as exc:
+        raise SyncError(str(exc)) from exc
 
-    for filename in config.managed_files:
-        repo_file = repo_dir / filename
-        if not repo_file.exists():
-            continue
-        dest = local_ssh / filename
-        try:
-            copy_from_repo(repo_dir, filename, dest)
-            updated.append(filename)
-        except SSHFileError as exc:
-            raise SyncError(f"Failed to apply {filename}: {exc}") from exc
 
-    return updated
+def pull_ssh_files(cfg: SyncConfig, repo_dir: Path) -> None:
+    """Pull latest changes from remote and merge into local SSH files.
+
+    For each managed file the remote version is merged with the local
+    copy (preferring local content) before writing back.  A backup of
+    the original local file is created first.
+
+    Raises :class:`SyncError` on any failure.
+    """
+    try:
+        pull(repo_dir, branch=cfg.branch)
+
+        for filename in cfg.managed_files:
+            local_path = cfg.ssh_dir / filename
+            remote_path = repo_dir / filename
+
+            if not remote_path.exists():
+                continue
+
+            remote_content = read_file(remote_path)
+            local_content = read_file(local_path) if local_path.exists() else ""
+
+            merge_fn = _MERGE_FN.get(filename)
+            if merge_fn is None:
+                # Unknown file type: remote wins only if local is absent
+                merged = local_content or remote_content
+            else:
+                merged = merge_fn(local_content, remote_content)
+
+            if local_path.exists():
+                backup_file(local_path)
+
+            write_file(local_path, merged)
+
+    except (SSHFileError, GitError) as exc:
+        raise SyncError(str(exc)) from exc
